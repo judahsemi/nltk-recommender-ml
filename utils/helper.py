@@ -197,7 +197,14 @@ def calculate_text_sentiment(text, verbose=True):
 
 
 def score_clusters(clusters, comments_noun_synsets, comments, verbose=True):
-    """ Score clusters """
+    """ Score clusters
+
+    score (clusteri) =
+        {total number of repetitions of nouns in the clusteri} *
+        {Sum of score of each sentence of (clusteri)} /
+        {Total number of sentences in (clusteri)}
+    """
+
     # Map each synset to it's cluster; reverse of clusters
     synset_to_cluster = {syn: n for n, synsets in clusters.items() for syn in synsets}
     
@@ -211,10 +218,23 @@ def score_clusters(clusters, comments_noun_synsets, comments, verbose=True):
             if syn not in synset_to_cluster or c in cluster_to_comments[synset_to_cluster[syn]]:
                 continue
             cluster_to_comments[synset_to_cluster[syn]].append(c)
-            
+
     # Score each cluster
-    cluster_to_score = {cluster: sum([comment_to_senti[c] for c in cluster_comments])\
-        for cluster, cluster_comments in cluster_to_comments.items()}
+    cluster_to_repetitions = {}
+    cluster_to_score = {}
+    for cluster, cluster_comments in cluster_to_comments.items():
+        no_of_noun_repetitions = 0
+
+        all_noun_synsets = []
+        for c in cluster_comments:
+            all_noun_synsets.extend([lesk(c, n, pos=wn.NOUN) for n in extract_nouns(c)])
+        all_noun_synsets = [s for s in all_noun_synsets if s]
+
+        is_in_cluster = lambda k, c: sum([1 for syn in clusters[c] if k.name() == syn.name])
+        cluster_to_score[cluster] = (
+            max(1, sum([v for k, v in Counter(all_noun_synsets).items() if v>=2 and is_in_cluster(k, cluster)])) *\
+            sum([comment_to_senti[c] for c in cluster_comments]) /\
+            len(cluster_comments))
     return cluster_to_score
 
 
@@ -226,6 +246,7 @@ def extract_user_prefs(comments, use_relatives=True, threshold=0.5, verbose=True
     # Extract the nouns in each comment
     each_comment_noun_synsets = [
         [lesk(c, n, pos=wn.NOUN) for n in extract_nouns(c)] for c in each_comment_tokens]
+    each_comment_noun_synsets = [[s for s in ss if s] for ss in each_comment_noun_synsets]
 
     if verbose:
         print("EXTRACTED NOUNS:\n=====\n\n", each_comment_noun_synsets)
