@@ -47,6 +47,9 @@ def get_related_synsets(synset):
     related_synsets = set()
     
     for l in synset.lemmas():
+        if not l:
+            continue
+
         # Add lemmas (could be the same thing as synset)
         related_synsets.add(l.synset())
         
@@ -115,21 +118,81 @@ def cluster_synsets(synsets, use_relatives=True, threshold=0.5, verbose=False):
     return clusters
 
 
-def calculate_text_sentiment(text_tokens, verbose=True):
+def calculate_text_sentiment(text, verbose=True):
     """ Calculate the sum sentiment of words in text_tokens """
     sentiment_score = 0
- 
-    for t in text_tokens:
-        t_synset = lesk(text_tokens, t, pos=None)
-        if not t_synset:
-            continue
- 
-        # Calculate token's sentiment
-        t_senti = swn.senti_synset(t_synset.name())
-        sentiment_score += (t_senti.pos_score() - t_senti.neg_score())
+
+    # Split text into sentence for better sentiment analysis
+    sent_tokens = [nltk.word_tokenize(sent) for sent in nltk.sent_tokenize(text.lower())]
+
+    # If each sentence in text calculate it's sentiment and add to overall sentiment
+    for tokens in sent_tokens:
+        # keep track of "not" streak
+        not_streak = 0
+
+        tokens_and_tags = nltk.pos_tag(tokens)
+        for i, t_and_tag in enumerate(tokens_and_tags):
+            t, tag = t_and_tag
+
+            apply_negate = False
+
+            # If token is a "not" add *-2 the sentiment of the next/prev token
+            if t in ["n't", "not"]:
+                not_streak += 1
+                t_synset = None
+
+                # Use the next token if token is not last token
+                if i+1 < len(tokens_and_tags):
+                    next_t, next_tag = tokens_and_tags[i+1]
+                    if next_t in ["n't", "not"]:
+                        continue
+
+                    t_synset = lesk(tokens, next_t, pos=tag_to_pos.get(next_tag[0], None))
+
+                # Use the previous token if token is not first token
+                if not t_synset and i > 0:
+                    prev_t, prev_tag = tokens_and_tags[i-1]
+
+                    # If this is the last token (streak is definately > 0), apply not_streak
+                    if prev_t in ["n't", "not"]:
+                        apply_negate = True
+                        prev_t, prev_tag = tokens_and_tags[i-not_streak]
+
+                    t_synset = lesk(tokens, prev_t, pos=tag_to_pos.get(prev_tag[0], None))
+
+                # Add "not" sentiment score if it is the only word.
+                if not t_synset:
+                    sentiment_score += -0.625
+                    continue
+
+                t_senti = swn.senti_synset(t_synset.name())
+                if apply_negate and not_streak%2 == 0:
+                    not_streak = 0
+                    continue
+
+                elif apply_negate:
+                    score = -2 * (t_senti.pos_score() - t_senti.neg_score())
+
+                else:
+                    score = 2 * ((-1)**(not_streak+1)) * (t_senti.pos_score() - t_senti.neg_score())
+
+                not_streak = 0
+                score = -0.625 if score == 0 else score
+
+            else:
+                t_synset = lesk(tokens, t, pos=tag_to_pos.get(tag[0], None))
+                if not t_synset:
+                    continue
+
+                t_senti = swn.senti_synset(t_synset.name())
+                score = (t_senti.pos_score() - t_senti.neg_score())
+                not_streak = 0
+
+            # Calculate token's sentiment
+            sentiment_score += score
         
     if verbose:
-        print("sentiment: {:>7.2f}; {}".format(sentiment_score, text_tokens))
+        print("sentiment: {:>7.2f}; {}".format(sentiment_score, sent_tokens))
     return sentiment_score
 
 
@@ -139,7 +202,7 @@ def score_clusters(clusters, comments_noun_synsets, comments, verbose=True):
     synset_to_cluster = {syn: n for n, synsets in clusters.items() for syn in synsets}
     
     # Map each comment to it's sentiment score
-    comment_to_senti = {c: calculate_text_sentiment(nltk.word_tokenize(c), verbose) for c in comments}
+    comment_to_senti = {c: calculate_text_sentiment(c, verbose) for c in comments}
     
     # Map each comment to clusters
     cluster_to_comments = {n: [] for n in clusters}
@@ -150,7 +213,8 @@ def score_clusters(clusters, comments_noun_synsets, comments, verbose=True):
             cluster_to_comments[synset_to_cluster[syn]].append(c)
             
     # Score each cluster
-    cluster_to_score = {cluster: sum([comment_to_senti[c] for c in cluster_comments])        for cluster, cluster_comments in cluster_to_comments.items()}
+    cluster_to_score = {cluster: sum([comment_to_senti[c] for c in cluster_comments])\
+        for cluster, cluster_comments in cluster_to_comments.items()}
     return cluster_to_score
 
 
@@ -158,23 +222,27 @@ def extract_user_prefs(comments, use_relatives=True, threshold=0.5, verbose=True
     """ Extract user preferences based on their previous comments or reviews """
     # Tokenize: Split text into a list of words
     each_comment_tokens = [nltk.word_tokenize(c.lower()) for c in comments]
-    
+
     # Extract the nouns in each comment
     each_comment_noun_synsets = [
         [lesk(c, n, pos=wn.NOUN) for n in extract_nouns(c)] for c in each_comment_tokens]
-    print("EXTRACTED NOUNS:\n=====\n\n", each_comment_noun_synsets)
- 
+
+    if verbose:
+        print("EXTRACTED NOUNS:\n=====\n\n", each_comment_noun_synsets)
+
     # Cluster noun synsets
     all_synsets = set()
     for synsets in each_comment_noun_synsets:
-        all_synsets.update(synsets)
+        all_synsets.update([syn for syn in synsets if syn])
     all_synsets = sorted(list(all_synsets))
     
     clusters = cluster_synsets(all_synsets, use_relatives, threshold, verbose)
-    print("\nCLUSTERS:\n=====\n")
-    for k, v in clusters.items():
-        print("cluster {}: count={}, {}".format(k, len(v), v))
-        
+
+    if verbose:
+        print("\nCLUSTERS:\n=====\n")
+        for k, v in clusters.items():
+            print("cluster {}: count={}, {}".format(k, len(v), v))
+
     # Score clusters and get preferneces
     cluster_to_score = score_clusters(clusters, each_comment_noun_synsets, comments, verbose)
     max_score = max(list(cluster_to_score.values()))
@@ -183,9 +251,11 @@ def extract_user_prefs(comments, use_relatives=True, threshold=0.5, verbose=True
     for cluster, score in cluster_to_score.items():
         if score == max_score:
             user_prefs.extend(clusters[cluster])
-    print("\n\nCLUSTERS SCORE:\n=====\n")
-    for k, v in cluster_to_score.items():
-        print("cluster: {}, score: {}".format(k, v))
+
+    if verbose:
+        print("\n\nCLUSTERS SCORE:\n=====\n")
+        for k, v in cluster_to_score.items():
+            print("cluster: {}, score: {}".format(k, v))
         
     print("\n\nUSER PREFERENCES:\n=====\n\n", user_prefs)
     return user_prefs
